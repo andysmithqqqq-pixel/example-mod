@@ -6,9 +6,9 @@
     "mac": "2.2081",
     "ios": "2.2081"
   },
-  "id": "yourname.fakeban",
-  "name": "FakeBan Screen",
+  "id": "yourname.wheel",
+  "name": "Wheel of Fortune",
   "version": "v1.0.0",
   "developer": "yourname",
-  "description": "Shows a fake ban screen on startup that blocks the game until disabled in the config file."
+  "description": "Spin a wheel in the main menu and get a random effect for your next level."
 }
