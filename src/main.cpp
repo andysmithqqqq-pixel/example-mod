@@ -88,16 +88,11 @@ class $modify(BanMenuLayer, MenuLayer) {
     bool init() {
         if (!MenuLayer::init()) return false;
 
-        static bool shown = false;
-        if (shown) return true;
-        shown = true;
-
         auto cfg = loadConfig();
         if (cfg.disabled) return true;
 
         if (auto layer = BanLayer::create(cfg)) {
-            layer->setZOrder(10000);
-            SceneManager::get()->keepAcrossScenes(layer);
+            this->addChild(layer, 10000);
         }
         return true;
     }
