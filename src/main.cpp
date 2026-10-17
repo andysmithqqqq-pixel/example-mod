@@ -1,8 +1,11 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/FLAlertLayer.hpp>
 #include <Geode/utils/file.hpp>
 
 using namespace geode::prelude;
+
+constexpr int BAN_TAG = 98431;
 
 struct BanConfig {
     bool disabled = false;
@@ -35,52 +38,15 @@ static BanConfig loadConfig() {
     return cfg;
 }
 
-class BanLayer : public CCLayerColor {
-protected:
-    bool init(BanConfig const& cfg) {
-        if (!CCLayerColor::initWithColor({0, 0, 0, 150})) return false;
-
-        auto winSize = CCDirector::get()->getWinSize();
-        CCPoint center = ccp(winSize.width / 2, winSize.height / 2);
-
-        auto bg = CCScale9Sprite::create("GJ_square01.png", {0.f, 0.f, 80.f, 80.f});
-        bg->setContentSize({360.f, 200.f});
-        bg->setPosition(center);
-        this->addChild(bg);
-
-        auto title = CCLabelBMFont::create(cfg.title.c_str(), "goldFont.fnt");
-        title->setScale(1.0f);
-        title->setPosition(center + ccp(0.f, 72.f));
-        this->addChild(title);
-
-        auto text = TextArea::create(
-            cfg.message, "chatFont.fnt", 1.f, 320.f, {0.5f, 0.5f}, 22.f, false
-        );
-        text->setPosition(center - ccp(0.f, 12.f));
-        this->addChild(text);
-
-        this->setTouchEnabled(true);
-        this->setKeypadEnabled(true);
-        return true;
+class $modify(BanAlert, FLAlertLayer) {
+    void onBtn1(CCObject* sender) {
+        if (this->getTag() == BAN_TAG) return;
+        FLAlertLayer::onBtn1(sender);
     }
 
-    void registerWithTouchDispatcher() override {
-        CCDirector::get()->getTouchDispatcher()->addTargetedDelegate(this, -9999, true);
-    }
-
-    bool ccTouchBegan(CCTouch*, CCEvent*) override { return true; }
-
-    void keyBackClicked() override {}
-
-public:
-    static BanLayer* create(BanConfig const& cfg) {
-        auto ret = new BanLayer();
-        if (ret && ret->init(cfg)) {
-            ret->autorelease();
-            return ret;
-        }
-        CC_SAFE_DELETE(ret);
-        return nullptr;
+    void keyBackClicked() {
+        if (this->getTag() == BAN_TAG) return;
+        FLAlertLayer::keyBackClicked();
     }
 };
 
@@ -91,9 +57,13 @@ class $modify(BanMenuLayer, MenuLayer) {
         auto cfg = loadConfig();
         if (cfg.disabled) return true;
 
-        if (auto layer = BanLayer::create(cfg)) {
-            this->addChild(layer, 10000);
-        }
+        auto alert = FLAlertLayer::create(
+            nullptr, cfg.title.c_str(), cfg.message, "OK", nullptr, 360.f
+        );
+        alert->setTag(BAN_TAG);
+        alert->setTouchEnabled(true);
+        alert->setKeypadEnabled(true);
+        this->addChild(alert, 10000);
         return true;
     }
 };
