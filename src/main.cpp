@@ -1,478 +1,363 @@
 #include <Geode/Geode.hpp>
-#include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
-#include <random>
+#include <Geode/utils/cocos.hpp>
+#include <functional>
+#include <vector>
+#include <string>
 #include <cmath>
 
 using namespace geode::prelude;
 
-static float frand(float a, float b) {
-    static std::mt19937 gen{std::random_device{}()};
-    return std::uniform_real_distribution<float>(a, b)(gen);
+static constexpr float kBlock = 30.f;
+static constexpr float kFlyBlocks = 23.f;
+static constexpr float kLieSeconds = 12.f;
+static constexpr float kHitRadius = 70.f;
+static constexpr float kGravity = 900.f;
+static constexpr float kLaunchVy = 420.f;
+static constexpr float kGhostScale = 0.45f;
+
+static bool isPaused() {
+    auto sc = CCDirector::get()->getRunningScene();
+    if (!sc || !sc->getChildren()) return false;
+    for (auto c : CCArrayExt<CCNode*>(sc->getChildren())) {
+        if (c && typeinfo_cast<PauseLayer*>(c)) return true;
+    }
+    return false;
 }
 
-struct Effect {
-    std::string name, desc;
-    int cat;
-    float speed = 1.f, rot = 0.f, zoom = 1.f;
-    float flipX = 1.f, flipY = 1.f, playerScale = 1.f;
-    ccColor4B tint = {0, 0, 0, 0};
-    bool hidePlayer = false, hideUI = false, chaos = false;
-    bool oneLife = false, shake = false, disco = false, blink = false;
-
-    Effect(std::string n, std::string d, int c)
-        : name(std::move(n)), desc(std::move(d)), cat(c) {}
-
-    Effect& Speed(float v) { speed = v; return *this; }
-    Effect& Rot(float v) { rot = v; return *this; }
-    Effect& Zoom(float v) { zoom = v; return *this; }
-    Effect& FlipX() { flipX = -1.f; return *this; }
-    Effect& FlipY() { flipY = -1.f; return *this; }
-    Effect& Player(float v) { playerScale = v; return *this; }
-    Effect& Tint(int r, int g, int b, int a) { tint = ccc4(r, g, b, a); return *this; }
-    Effect& HidePlayer() { hidePlayer = true; return *this; }
-    Effect& HideUI() { hideUI = true; return *this; }
-    Effect& Chaos() { chaos = true; return *this; }
-    Effect& OneLife() { oneLife = true; return *this; }
-    Effect& Shake() { shake = true; return *this; }
-    Effect& Disco() { disco = true; return *this; }
-    Effect& Blink() { blink = true; return *this; }
-};
-
-static char const* kCatName[6] = {"SPEED", "SCREEN", "PLAYER", "COLOR", "CHAOS", "LUCKY"};
-static ccColor3B kCatColor[6] = {
-    {60, 200, 90}, {60, 130, 230}, {240, 200, 40},
-    {170, 80, 220}, {230, 60, 60}, {90, 220, 220}
-};
-
-static std::vector<Effect> const& effects() {
-    static std::vector<Effect> v;
-    if (!v.empty()) return v;
-
-    auto add = [&](char const* n, char const* d, int c) -> Effect& {
-        v.emplace_back(n, d, c);
-        return v.back();
-    };
-
-    // SPEED
-    add("Snail", "The game crawls at 0.3x speed.", 0).Speed(0.3f);
-    add("Slow Motion", "The game runs at half speed.", 0).Speed(0.5f);
-    add("Chill", "A relaxed 0.75x speed.", 0).Speed(0.75f);
-    add("Quick", "A bit faster: 1.25x speed.", 0).Speed(1.25f);
-    add("Fast", "The game runs at 1.5x speed.", 0).Speed(1.5f);
-    add("Turbo", "Double speed.", 0).Speed(2.f);
-    add("Hyper", "2.5x speed. Good luck.", 0).Speed(2.5f);
-    add("Ludicrous", "Triple speed.", 0).Speed(3.f);
-    add("Speed Roulette", "Speed changes randomly every few seconds.", 0).Chaos();
-    add("Rubber Band", "Slower base speed, random changes.", 0).Speed(0.7f).Chaos();
-
-    // SCREEN
-    add("Upside Down", "The whole screen is flipped.", 1).Rot(180.f);
-    add("Sideways Left", "The screen is turned left.", 1).Rot(90.f);
-    add("Sideways Right", "The screen is turned right.", 1).Rot(-90.f);
-    add("Tilt Left", "The screen is tilted left.", 1).Rot(-15.f);
-    add("Tilt Right", "The screen is tilted right.", 1).Rot(15.f);
-    add("Mirror", "Left and right are swapped.", 1).FlipX();
-    add("Flip Vertical", "Up and down are swapped.", 1).FlipY();
-    add("Double Flip", "Mirrored both ways.", 1).FlipX().FlipY();
-    add("Zoom In", "The camera is closer.", 1).Zoom(1.3f);
-    add("Close Up", "The camera is very close.", 1).Zoom(1.6f);
-    add("Zoom Out", "The camera is further away.", 1).Zoom(0.75f);
-    add("Tiny View", "Everything is small.", 1).Zoom(0.5f);
-    add("Earthquake", "The screen shakes.", 1).Shake();
-    add("No UI", "The interface is hidden.", 1).HideUI();
-
-    // PLAYER
-    add("Big Icon", "Your icon is 1.5x bigger.", 2).Player(1.5f);
-    add("Giant", "Your icon is double size.", 2).Player(2.f);
-    add("Colossus", "Your icon is triple size.", 2).Player(3.f);
-    add("Small Icon", "Your icon is a bit smaller.", 2).Player(0.7f);
-    add("Tiny", "Your icon is half size.", 2).Player(0.5f);
-    add("Micro", "Your icon is very tiny.", 2).Player(0.3f);
-    add("Invisible", "You cannot see your icon.", 2).HidePlayer();
-    add("Giant Slowpoke", "Giant icon, slower game.", 2).Player(2.f).Speed(0.7f);
-    add("Tiny Rocket", "Tiny icon, faster game.", 2).Player(0.5f).Speed(1.5f);
-    add("Ghost Mode", "No icon and no interface.", 2).HidePlayer().HideUI();
-
-    // COLOR
-    add("Red Alert", "The screen is tinted red.", 3).Tint(255, 0, 0, 70);
-    add("Ocean", "The screen is tinted blue.", 3).Tint(0, 110, 255, 70);
-    add("Toxic", "The screen is tinted green.", 3).Tint(0, 255, 60, 60);
-    add("Sunset", "The screen is tinted orange.", 3).Tint(255, 140, 0, 70);
-    add("Pink Haze", "The screen is tinted pink.", 3).Tint(255, 0, 200, 70);
-    add("Night", "It gets dark.", 3).Tint(0, 0, 0, 150);
-    add("Deep Night", "It gets very dark.", 3).Tint(0, 0, 0, 200);
-    add("Fog", "A white fog covers the screen.", 3).Tint(255, 255, 255, 120);
-    add("Whiteout", "Almost everything is white.", 3).Tint(255, 255, 255, 170);
-    add("Gold Rush", "The screen is tinted gold.", 3).Tint(255, 215, 0, 70);
-    add("Disco", "The colors keep changing.", 3).Tint(255, 0, 0, 70).Disco();
-    add("Strobe", "White flashes. Careful with your eyes.", 3).Tint(255, 255, 255, 160).Blink();
-    add("Red Strobe", "Red flashes.", 3).Tint(255, 0, 0, 150).Blink();
-
-    // CHAOS
-    add("Drunk Pilot", "Shaking, tilted and unstable speed.", 4).Shake().Rot(5.f).Chaos();
-    add("Disco Fever", "Changing colors and faster game.", 4).Tint(255, 0, 0, 70).Disco().Speed(1.3f);
-    add("Nightmare", "Dark and too close.", 4).Tint(0, 0, 0, 180).Zoom(1.3f);
-    add("Total Chaos", "Everything at once.", 4).Shake().Chaos().Disco().Tint(255, 0, 0, 60).Rot(10.f);
-    add("Mirror Madness", "Mirrored screen, random speed.", 4).FlipX().Chaos();
-    add("Vertigo", "Upside down and shaking.", 4).Rot(180.f).Shake();
-    add("Blackout", "Almost no light, slower game.", 4).Tint(0, 0, 0, 230).Speed(0.7f);
-    add("One Life", "Any death throws you out of the level.", 4).OneLife();
-    add("One Life Turbo", "One life at 1.5x speed.", 4).OneLife().Speed(1.5f);
-    add("One Life Invisible", "One life and no icon.", 4).OneLife().HidePlayer();
-    add("Earthquake Rush", "Shaking screen, faster game.", 4).Shake().Speed(1.5f);
-    add("Funhouse", "Mirrored, tilted and zoomed.", 4).FlipX().Rot(8.f).Zoom(1.2f);
-
-    // LUCKY
-    add("Clean Run", "Nothing happens. Enjoy.", 5);
-    add("Lucky Charm", "No effect this time.", 5);
-    add("Practice Pace", "Slightly slower with a wider view.", 5).Speed(0.8f).Zoom(0.85f);
-    add("Zen", "Slow and calm with a soft green tint.", 5).Speed(0.6f).Tint(0, 255, 120, 40);
-    add("Golden Hour", "A bit slower with a golden glow.", 5).Speed(0.9f).Tint(255, 215, 0, 40);
-    add("Jackpot", "Half speed, wide view, golden glow.", 5).Speed(0.5f).Zoom(0.8f).Tint(255, 215, 0, 50);
-
-    return v;
+static void collectRemote(CCNode* node, std::vector<CCNode*>& out, int depth) {
+    if (!node || depth > 4) return;
+    auto kids = node->getChildren();
+    if (!kids) return;
+    for (auto c : CCArrayExt<CCNode*>(kids)) {
+        if (!c) continue;
+        if (typeinfo_cast<CCSpriteBatchNode*>(c) || typeinfo_cast<GameObject*>(c)) continue;
+        std::string name = geode::cocos::getObjectName(c);
+        if (name.find("RemotePlayer") != std::string::npos
+            || name.find("ComplexVisualPlayer") != std::string::npos) {
+            if (c->isVisible()) out.push_back(c);
+            continue;
+        }
+        collectRemote(c, out, depth + 1);
+    }
 }
 
-static int s_current = -1;
-static float s_chaosLeft = 0.f;
-static float s_chaosMul = 1.f;
-
-static Effect const* current() {
-    if (!PlayLayer::get()) return nullptr;
-    auto& list = effects();
-    if (s_current < 0 || s_current >= static_cast<int>(list.size())) return nullptr;
-    return &list[s_current];
+static CCNode* makeHand() {
+    auto root = CCNode::create();
+    auto d = CCDrawNode::create();
+    ccColor4F skin = {1.f, 0.80f, 0.35f, 1.f};
+    ccColor4F edge = {0.35f, 0.2f, 0.05f, 1.f};
+    CCPoint palm[4] = {ccp(-10.f, 0.f), ccp(10.f, 0.f), ccp(10.f, 16.f), ccp(-10.f, 16.f)};
+    d->drawPolygon(palm, 4, skin, 1.f, edge);
+    float h[4] = {10.f, 12.f, 11.f, 8.f};
+    for (int i = 0; i < 4; i++) {
+        float x = -10.f + i * 5.f;
+        CCPoint f[4] = {ccp(x, 16.f), ccp(x + 4.2f, 16.f),
+                        ccp(x + 4.2f, 16.f + h[i]), ccp(x, 16.f + h[i])};
+        d->drawPolygon(f, 4, skin, 1.f, edge);
+    }
+    CCPoint th[4] = {ccp(-10.f, 3.f), ccp(-18.f, 10.f), ccp(-15.f, 14.f), ccp(-10.f, 10.f)};
+    d->drawPolygon(th, 4, skin, 1.f, edge);
+    root->addChild(d);
+    return root;
 }
 
-class $modify(WheelScheduler, CCScheduler) {
-    void update(float dt) {
-        float mul = 1.f;
-        if (auto e = current()) {
-            mul = e->speed;
-            if (e->chaos) {
-                s_chaosLeft -= dt;
-                if (s_chaosLeft <= 0.f) {
-                    s_chaosLeft = frand(1.5f, 4.f);
-                    s_chaosMul = frand(0.5f, 2.f);
-                }
-                mul *= s_chaosMul;
-            }
-        }
-        CCScheduler::update(dt * mul);
-    }
-};
+static void playSlapSound() {
+    auto fmod = FMODAudioEngine::sharedEngine();
+    if (fmod) fmod->playEffect("explode_11.ogg", 2.2f, 1.f, 0.8f);
+}
 
-class $modify(WheelPlayLayer, PlayLayer) {
-    struct Fields {
-        bool quitting = false;
-    };
-
-    void setupHasCompleted() {
-        PlayLayer::setupHasCompleted();
-
-        s_current = -1;
-        int idx = Mod::get()->getSavedValue<int>("active", -1);
-        auto& list = effects();
-        if (idx < 0 || idx >= static_cast<int>(list.size())) return;
-
-        Mod::get()->setSavedValue<int>("active", -1);
-        s_current = idx;
-        auto const& e = list[idx];
-
-        auto win = CCDirector::get()->getWinSize();
-
-        bool transform = e.rot != 0.f || e.zoom != 1.f || e.flipX != 1.f
-            || e.flipY != 1.f || e.shake;
-        if (transform) {
-            this->ignoreAnchorPointForPosition(false);
-            this->setAnchorPoint({0.5f, 0.5f});
-            this->setPosition({win.width / 2, win.height / 2});
-            this->setRotation(e.rot);
-            this->setScaleX(e.zoom * e.flipX);
-            this->setScaleY(e.zoom * e.flipY);
-        }
-        if (e.shake) {
-            this->schedule(schedule_selector(WheelPlayLayer::shakeTick));
-        }
-
-        if (e.tint.a > 0) {
-            auto overlay = CCLayerColor::create(e.tint, win.width * 3, win.height * 3);
-            overlay->setPosition({-win.width, -win.height});
-            this->addChild(overlay, 1000);
-
-            if (e.disco) {
-                overlay->runAction(CCRepeatForever::create(CCSequence::create(
-                    CCTintTo::create(0.6f, 255, 0, 0),
-                    CCTintTo::create(0.6f, 0, 255, 0),
-                    CCTintTo::create(0.6f, 0, 0, 255),
-                    nullptr
-                )));
-            }
-            if (e.blink) {
-                overlay->runAction(CCRepeatForever::create(CCSequence::create(
-                    CCFadeTo::create(0.12f, e.tint.a),
-                    CCFadeTo::create(0.12f, 0),
-                    nullptr
-                )));
-            }
-        }
-
-        if (e.hideUI && m_uiLayer) m_uiLayer->setVisible(false);
-
-        Notification::create("Effect: " + e.name, NotificationIcon::None, 2.f)->show();
-    }
-
-    void shakeTick(float) {
-        auto e = current();
-        if (!e || !e->shake) return;
-        auto win = CCDirector::get()->getWinSize();
-        this->setPosition({win.width / 2 + frand(-5.f, 5.f), win.height / 2 + frand(-5.f, 5.f)});
-    }
-
-    void postUpdate(float dt) {
-        PlayLayer::postUpdate(dt);
-        auto e = current();
-        if (!e) return;
-
-        if (e->hidePlayer) {
-            if (m_player1) m_player1->setVisible(false);
-            if (m_player2) m_player2->setVisible(false);
-        }
-        if (e->playerScale != 1.f) {
-            if (m_player1) m_player1->setScale(e->playerScale);
-            if (m_player2) m_player2->setScale(e->playerScale);
-        }
-    }
-
-    void destroyPlayer(PlayerObject* player, GameObject* object) {
-        PlayLayer::destroyPlayer(player, object);
-        auto e = current();
-        if (e && e->oneLife && !m_fields->quitting) {
-            m_fields->quitting = true;
-            this->scheduleOnce(schedule_selector(WheelPlayLayer::quitNow), 1.3f);
-        }
-    }
-
-    void quitNow(float) {
-        this->onQuit();
-    }
-
-    void onQuit() {
-        s_current = -1;
-        PlayLayer::onQuit();
-    }
-};
-
-class WheelLayer : public CCLayerColor {
+// Draggable on-screen button
+class SlapButton : public CCLayer {
 protected:
-    CCNode* m_wheel = nullptr;
-    CCLabelBMFont* m_status = nullptr;
-    bool m_spinning = false;
-    int m_sector = 0;
+    CCNode* m_spr = nullptr;
+    CCPoint m_grab = ccp(0.f, 0.f);
+    CCPoint m_last = ccp(0.f, 0.f);
+    float m_total = 0.f;
+    bool m_drag = false;
+    std::function<void()> m_cb;
 
-    bool init() {
-        if (!CCLayerColor::initWithColor({0, 0, 0, 160})) return false;
-
+    bool init(std::function<void()> cb) {
+        if (!CCLayer::init()) return false;
+        m_cb = std::move(cb);
         auto win = CCDirector::get()->getWinSize();
-        CCPoint c = ccp(win.width / 2, win.height / 2);
-        float R = 90.f;
-
-        auto bg = CCScale9Sprite::create("GJ_square01.png", {0.f, 0.f, 80.f, 80.f});
-        bg->setContentSize({420.f, 300.f});
-        bg->setPosition(c);
-        this->addChild(bg);
-
-        auto title = CCLabelBMFont::create("Wheel of Fortune", "goldFont.fnt");
-        title->setScale(0.8f);
-        title->setPosition(c + ccp(0.f, 132.f));
-        this->addChild(title);
-
-        // Wheel
-        m_wheel = CCNode::create();
-        m_wheel->setPosition(c + ccp(0.f, 14.f));
-        this->addChild(m_wheel);
-
-        auto draw = CCDrawNode::create();
-        m_wheel->addChild(draw);
-        int n = 12;
-        float step = 360.f / n;
-        for (int i = 0; i < n; i++) {
-            std::vector<CCPoint> pts;
-            pts.push_back(ccp(0.f, 0.f));
-            for (int k = 0; k <= 10; k++) {
-                float a = (i * step + step * k / 10.f) * 3.14159265f / 180.f;
-                pts.push_back(ccp(sinf(a) * R, cosf(a) * R));
-            }
-            auto col = kCatColor[i % 6];
-            ccColor4F fill = {col.r / 255.f, col.g / 255.f, col.b / 255.f, 1.f};
-            ccColor4F border = {0.f, 0.f, 0.f, 1.f};
-            draw->drawPolygon(pts.data(), static_cast<unsigned int>(pts.size()), fill, 1.5f, border);
-        }
-        // Outer ring
-        std::vector<CCPoint> ring;
-        for (int k = 0; k < 72; k++) {
-            float a = k * 5.f * 3.14159265f / 180.f;
-            ring.push_back(ccp(sinf(a) * R, cosf(a) * R));
-        }
-        draw->drawPolygon(ring.data(), 72, {0.f, 0.f, 0.f, 0.f}, 3.f, {1.f, 1.f, 1.f, 1.f});
-
-        for (int i = 0; i < n; i++) {
-            float mid = i * step + step / 2.f;
-            float rad = mid * 3.14159265f / 180.f;
-            auto lbl = CCLabelBMFont::create(kCatName[i % 6], "bigFont.fnt");
-            lbl->setScale(0.32f);
-            lbl->setPosition({sinf(rad) * R * 0.62f, cosf(rad) * R * 0.62f});
-            lbl->setRotation(mid - 90.f + (mid > 180.f ? 180.f : 0.f));
-            m_wheel->addChild(lbl);
-        }
-
-        // Fixed hub and pointer
-        auto fixed = CCDrawNode::create();
-        fixed->setPosition(c + ccp(0.f, 14.f));
-        this->addChild(fixed);
-        std::vector<CCPoint> hub;
-        for (int k = 0; k < 24; k++) {
-            float a = k * 15.f * 3.14159265f / 180.f;
-            hub.push_back(ccp(sinf(a) * 9.f, cosf(a) * 9.f));
-        }
-        fixed->drawPolygon(hub.data(), 24, {1.f, 0.85f, 0.2f, 1.f}, 2.f, {0.f, 0.f, 0.f, 1.f});
-        CCPoint tri[3] = {ccp(-10.f, R + 14.f), ccp(10.f, R + 14.f), ccp(0.f, R - 6.f)};
-        fixed->drawPolygon(tri, 3, {1.f, 1.f, 1.f, 1.f}, 2.f, {0.f, 0.f, 0.f, 1.f});
-
-        // Status
-        m_status = CCLabelBMFont::create("", "chatFont.fnt");
-        m_status->setPosition(c + ccp(0.f, -92.f));
-        this->addChild(m_status);
-        updateStatus();
-
-        // Buttons
-        auto menu = CCMenu::create();
-        menu->setPosition(c);
-        menu->setTouchPriority(-405);
-        this->addChild(menu);
-
-        auto spinSpr = ButtonSprite::create("SPIN");
-        spinSpr->setScale(0.8f);
-        auto spinBtn = CCMenuItemSpriteExtra::create(spinSpr, this, menu_selector(WheelLayer::onSpin));
-        spinBtn->setPosition({0.f, -122.f});
-        menu->addChild(spinBtn);
-
-        auto closeSpr = ButtonSprite::create("Close");
-        closeSpr->setScale(0.55f);
-        auto closeBtn = CCMenuItemSpriteExtra::create(closeSpr, this, menu_selector(WheelLayer::onClose));
-        closeBtn->setPosition({-160.f, -122.f});
-        menu->addChild(closeBtn);
-
-        auto clearSpr = ButtonSprite::create("Clear");
-        clearSpr->setScale(0.55f);
-        auto clearBtn = CCMenuItemSpriteExtra::create(clearSpr, this, menu_selector(WheelLayer::onClear));
-        clearBtn->setPosition({160.f, -122.f});
-        menu->addChild(clearBtn);
-
+        auto spr = ButtonSprite::create("SLAP");
+        float x = Mod::get()->getSavedValue<float>("btn-x", win.width / 2);
+        float y = Mod::get()->getSavedValue<float>("btn-y", win.height / 2);
+        spr->setPosition({x, y});
+        this->addChild(spr);
+        m_spr = spr;
         this->setTouchEnabled(true);
-        this->setKeypadEnabled(true);
         return true;
     }
 
-    void updateStatus() {
-        int idx = Mod::get()->getSavedValue<int>("active", -1);
-        auto& list = effects();
-        std::string t = (idx >= 0 && idx < static_cast<int>(list.size()))
-            ? "Next level: " + list[idx].name
-            : "No effect queued";
-        m_status->setString(t.c_str());
-    }
-
     void registerWithTouchDispatcher() override {
-        CCDirector::get()->getTouchDispatcher()->addTargetedDelegate(this, -400, true);
+        CCDirector::get()->getTouchDispatcher()->addTargetedDelegate(this, -510, true);
     }
 
-    bool ccTouchBegan(CCTouch*, CCEvent*) override { return true; }
-
-    void keyBackClicked() override {
-        if (!m_spinning) this->removeFromParentAndCleanup(true);
+    bool ccTouchBegan(CCTouch* t, CCEvent*) override {
+        if (!this->isVisible() || isPaused()) return false;
+        auto p = this->convertToNodeSpace(t->getLocation());
+        if (!m_spr->boundingBox().containsPoint(p)) return false;
+        m_drag = true;
+        m_total = 0.f;
+        m_last = p;
+        m_grab = m_spr->getPosition() - p;
+        m_spr->setScale(0.9f);
+        return true;
     }
 
-    void onClose(CCObject*) {
-        if (!m_spinning) this->removeFromParentAndCleanup(true);
-    }
-
-    void onClear(CCObject*) {
-        if (m_spinning) return;
-        Mod::get()->setSavedValue<int>("active", -1);
-        updateStatus();
-    }
-
-    void onSpin(CCObject*) {
-        if (m_spinning) return;
-        m_spinning = true;
-
-        m_sector = static_cast<int>(frand(0.f, 11.999f));
-        float jitter = frand(-10.f, 10.f);
-
-        float cur = fmodf(m_wheel->getRotation(), 360.f);
-        if (cur < 0.f) cur += 360.f;
-        float target = fmodf(360.f - (m_sector * 30.f + 15.f + jitter) + 720.f, 360.f);
-        float delta = 360.f * 6.f + fmodf(target - cur + 720.f, 360.f);
-
-        m_wheel->runAction(CCSequence::create(
-            CCEaseOut::create(CCRotateBy::create(5.f, delta), 3.f),
-            CCCallFunc::create(this, callfunc_selector(WheelLayer::onDone)),
-            nullptr
-        ));
-    }
-
-    void onDone() {
-        m_spinning = false;
-
-        auto& list = effects();
-        std::vector<int> pool;
-        for (int i = 0; i < static_cast<int>(list.size()); i++) {
-            if (list[i].cat == m_sector % 6) pool.push_back(i);
+    void ccTouchMoved(CCTouch* t, CCEvent*) override {
+        if (!m_drag) return;
+        auto p = this->convertToNodeSpace(t->getLocation());
+        m_total += ccpDistance(p, m_last);
+        m_last = p;
+        if (m_total > 10.f) {
+            auto win = CCDirector::get()->getWinSize();
+            auto np = p + m_grab;
+            np.x = std::max(0.f, std::min(win.width, np.x));
+            np.y = std::max(0.f, std::min(win.height, np.y));
+            m_spr->setPosition(np);
         }
-        if (pool.empty()) return;
-        int idx = pool[static_cast<size_t>(frand(0.f, static_cast<float>(pool.size()) - 0.001f))];
+    }
 
-        Mod::get()->setSavedValue<int>("active", idx);
-        updateStatus();
+    void ccTouchEnded(CCTouch*, CCEvent*) override {
+        if (!m_drag) return;
+        m_drag = false;
+        m_spr->setScale(1.f);
+        if (m_total > 10.f) {
+            Mod::get()->setSavedValue<float>("btn-x", m_spr->getPositionX());
+            Mod::get()->setSavedValue<float>("btn-y", m_spr->getPositionY());
+        } else if (m_cb) {
+            m_cb();
+        }
+    }
 
-        std::string body = list[idx].desc + "\n\n<cy>Applies to your next level.</c>";
-        FLAlertLayer::create(nullptr, list[idx].name.c_str(), body, "OK", nullptr, 320.f)->show();
+    void ccTouchCancelled(CCTouch*, CCEvent*) override {
+        m_drag = false;
+        if (m_spr) m_spr->setScale(1.f);
     }
 
 public:
-    static WheelLayer* create() {
-        auto ret = new WheelLayer();
-        if (ret && ret->init()) {
-            ret->autorelease();
-            return ret;
+    static SlapButton* create(std::function<void()> cb) {
+        auto r = new SlapButton();
+        if (r && r->init(std::move(cb))) {
+            r->autorelease();
+            return r;
         }
-        CC_SAFE_DELETE(ret);
+        CC_SAFE_DELETE(r);
         return nullptr;
     }
 };
 
-class $modify(WheelMenuLayer, MenuLayer) {
-    bool init() {
-        if (!MenuLayer::init()) return false;
+struct Ghost {
+    Ref<CCNode> real;
+    Ref<SimplePlayer> sp;
+    CCPoint vel = ccp(0.f, 0.f);
+    float av = 0.f;
+    float dir = 1.f;
+    float groundY = 0.f;
+    bool landed = false;
+    float lie = 0.f;
+};
 
-        auto menu = this->getChildByID("bottom-menu");
-        if (!menu) return true;
+class SlapController : public CCNode {
+protected:
+    PlayLayer* m_pl = nullptr;
+    CCNode* m_hand = nullptr;
+    SlapButton* m_btn = nullptr;
+    bool m_on = false;
+    bool m_swinging = false;
+    float m_facing = 1.f;
+    float m_lastX = 0.f;
+    std::vector<Ghost> m_ghosts;
 
-        auto spr = ButtonSprite::create("Wheel");
-        spr->setScale(0.6f);
-        auto btn = CCMenuItemSpriteExtra::create(
-            spr, this, menu_selector(WheelMenuLayer::onWheel)
+    bool init(PlayLayer* pl) {
+        if (!CCNode::init()) return false;
+        m_pl = pl;
+        auto win = CCDirector::get()->getWinSize();
+        m_on = Mod::get()->getSavedValue<bool>("enabled", false);
+
+        m_hand = makeHand();
+        m_hand->setScale(1.2f);
+        m_hand->setVisible(false);
+        pl->m_objectLayer->addChild(m_hand, 1999);
+
+        m_btn = SlapButton::create([this]() { this->slap(); });
+        this->addChild(m_btn, 5);
+
+        auto menu = CCMenu::create();
+        menu->setPosition({0.f, 0.f});
+        menu->setTouchPriority(-505);
+        this->addChild(menu, 6);
+
+        auto tog = CCMenuItemToggler::createWithStandardSprites(
+            this, menu_selector(SlapController::onToggle), 0.5f
         );
-        btn->setID("wheel-button"_spr);
-        menu->addChild(btn);
-        menu->updateLayout();
+        tog->setPosition({win.width - 24.f, 24.f});
+        tog->toggle(m_on);
+        menu->addChild(tog);
+
+        auto lbl = CCLabelBMFont::create("SLAP", "bigFont.fnt");
+        lbl->setScale(0.3f);
+        lbl->setPosition({win.width - 54.f, 24.f});
+        this->addChild(lbl, 6);
+
+        if (pl->m_player1) m_lastX = pl->m_player1->getPositionX();
+        this->schedule(schedule_selector(SlapController::tick));
         return true;
     }
 
-    void onWheel(CCObject*) {
-        this->addChild(WheelLayer::create(), 10000);
+    void onToggle(CCObject* s) {
+        m_on = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+        Mod::get()->setSavedValue<bool>("enabled", m_on);
+    }
+
+    void tick(float dt) {
+        if (!m_pl || !m_pl->m_player1) return;
+        auto p1 = m_pl->m_player1;
+
+        float x = p1->getPositionX();
+        if (fabsf(x - m_lastX) > 0.05f) m_facing = (x > m_lastX) ? 1.f : -1.f;
+        m_lastX = x;
+
+        bool show = m_on && !p1->m_isDead;
+        m_hand->setVisible(show);
+        m_btn->setVisible(m_on);
+
+        if (show && p1->getParent() && m_hand->getParent()) {
+            auto wp = p1->getParent()->convertToWorldSpace(p1->getPosition());
+            auto lp = m_hand->getParent()->convertToNodeSpace(wp);
+            m_hand->setPosition(lp + ccp(m_facing * 22.f, -6.f));
+            m_hand->setScaleX(m_facing * 1.2f);
+            m_hand->setScaleY(1.2f);
+            if (!m_swinging) m_hand->setRotation(m_facing * -15.f);
+        }
+
+        updateGhosts(dt);
+    }
+
+    void updateGhosts(float dt) {
+        for (auto it = m_ghosts.begin(); it != m_ghosts.end();) {
+            auto& g = *it;
+            if (g.real) g.real->setVisible(false);
+            if (!g.landed) {
+                g.vel.y -= kGravity * dt;
+                auto p = g.sp->getPosition();
+                p.x += g.vel.x * dt;
+                p.y += g.vel.y * dt;
+                if (p.y <= g.groundY && g.vel.y < 0.f) {
+                    p.y = g.groundY;
+                    g.landed = true;
+                    g.sp->setRotation(g.dir * 90.f);
+                } else {
+                    g.sp->setRotation(g.sp->getRotation() + g.av * dt);
+                }
+                g.sp->setPosition(p);
+            } else {
+                g.lie += dt;
+                if (g.lie >= kLieSeconds) {
+                    if (g.real) g.real->setVisible(true);
+                    g.sp->removeFromParentAndCleanup(true);
+                    it = m_ghosts.erase(it);
+                    continue;
+                }
+            }
+            ++it;
+        }
+    }
+
+    void slap() {
+        if (!m_on || m_swinging || !m_pl || !m_pl->m_player1) return;
+        m_swinging = true;
+        float f = m_facing;
+        m_hand->stopAllActions();
+        m_hand->runAction(CCSequence::create(
+            CCRotateTo::create(0.07f, f * -45.f),
+            CCEaseIn::create(CCRotateTo::create(0.06f, f * 110.f), 2.f),
+            CCCallFunc::create(this, callfunc_selector(SlapController::doHit)),
+            CCDelayTime::create(0.06f),
+            CCEaseOut::create(CCRotateTo::create(0.18f, f * -15.f), 2.f),
+            CCCallFunc::create(this, callfunc_selector(SlapController::swingDone)),
+            nullptr
+        ));
+    }
+
+    void swingDone() { m_swinging = false; }
+
+    bool alreadyFlying(CCNode* n) {
+        for (auto& g : m_ghosts) if (g.real == n) return true;
+        return false;
+    }
+
+    void doHit() {
+        playSlapSound();
+        auto p1 = m_pl->m_player1;
+        if (!p1 || !p1->getParent()) return;
+        auto me = p1->getParent()->convertToWorldSpace(p1->getPosition());
+        auto tip = me + ccp(m_facing * 40.f, 0.f);
+
+        std::vector<CCNode*> found;
+        collectRemote(m_pl, found, 0);
+        for (auto c : found) {
+            if (!c->getParent() || alreadyFlying(c)) continue;
+            auto tw = c->getParent()->convertToWorldSpace(c->getPosition());
+            if (ccpDistance(tw, tip) > kHitRadius) continue;
+            float dir = (tw.x >= me.x) ? 1.f : -1.f;
+            launch(c, tw, dir);
+        }
+    }
+
+    void launch(CCNode* target, CCPoint world, float dir) {
+        auto layer = m_pl->m_objectLayer;
+        auto lp = layer->convertToNodeSpace(world);
+
+        auto gm = GameManager::get();
+        auto sp = SimplePlayer::create(gm->getPlayerFrame());
+        sp->setColor(gm->colorForIdx(gm->getPlayerColor()));
+        sp->setSecondColor(gm->colorForIdx(gm->getPlayerColor2()));
+        sp->setScale(kGhostScale);
+        sp->setPosition(lp);
+        layer->addChild(sp, 2000);
+
+        float flight = 2.f * kLaunchVy / kGravity;
+        Ghost g;
+        g.real = target;
+        g.sp = sp;
+        g.dir = dir;
+        g.vel = ccp(dir * (kFlyBlocks * kBlock) / flight, kLaunchVy);
+        g.av = dir * 720.f;
+        g.groundY = lp.y;
+        m_ghosts.push_back(std::move(g));
+        target->setVisible(false);
+
+        auto lbl = CCLabelBMFont::create("SLAP!", "bigFont.fnt");
+        lbl->setScale(0.45f);
+        lbl->setColor({255, 60, 60});
+        lbl->setPosition(lp + ccp(0.f, 30.f));
+        layer->addChild(lbl, 2001);
+        lbl->runAction(CCSequence::create(
+            CCSpawn::create(CCMoveBy::create(0.6f, ccp(0.f, 30.f)), CCFadeOut::create(0.6f), nullptr),
+            CCRemoveSelf::create(),
+            nullptr
+        ));
+    }
+
+public:
+    static SlapController* create(PlayLayer* pl) {
+        auto r = new SlapController();
+        if (r && r->init(pl)) {
+            r->autorelease();
+            return r;
+        }
+        CC_SAFE_DELETE(r);
+        return nullptr;
+    }
+};
+
+class $modify(SlapPlayLayer, PlayLayer) {
+    void setupHasCompleted() {
+        PlayLayer::setupHasCompleted();
+        if (auto c = SlapController::create(this)) this->addChild(c, 9999);
     }
 };

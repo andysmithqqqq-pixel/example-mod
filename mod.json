@@ -6,9 +6,9 @@
     "mac": "2.2081",
     "ios": "2.2081"
   },
-  "id": "yourname.wheel",
-  "name": "Wheel of Fortune",
+  "id": "yourname.slap",
+  "name": "Slap",
   "version": "v1.0.0",
   "developer": "yourname",
-  "description": "Spin a wheel in the main menu and get a random effect for your next level."
+  "description": "Slap other players (works great with Globed) and send them flying."
 }
