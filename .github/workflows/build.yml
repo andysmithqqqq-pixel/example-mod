@@ -8,19 +8,8 @@ branches:
 
 jobs:
 build:
-strategy:
-fail-fast: false
-matrix:
-config:
-- name: Android32
-os: ubuntu-latest
-target: Android32
-- name: Android64
-os: ubuntu-latest
-target: Android64
-
-name: ${{ matrix.config.name }}
-runs-on: ${{ matrix.config.os }}
+name: Android64
+runs-on: ubuntu-latest
 
 steps:
   - uses: actions/checkout@v4
@@ -30,7 +19,7 @@ steps:
     with:
       bindings: geode-sdk/bindings
       combine: true
-      target: ${{ matrix.config.target }}
+      target: Android64
 
 package:
 name: Package builds
@@ -43,5 +32,5 @@ steps:
 
   - uses: actions/upload-artifact@v4
     with:
-      name: Build Output
+      name: Slap-Android64
       path: ${{ steps.build.outputs.build-output }}
