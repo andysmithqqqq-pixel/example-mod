@@ -1,478 +1,306 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/LevelEditorLayer.hpp>
+#include <Geode/ui/GeodeUI.hpp>
 #include <Geode/utils/cocos.hpp>
-#include <functional>
-#include <vector>
-#include <string>
-#include <string_view>
-#include <cmath>
-#include <algorithm>
+#include <Geode/utils/web.hpp>
 
 using namespace geode::prelude;
 
-static constexpr float kBlock = 30.f;
-static constexpr float kFlyBlocks = 23.f;
-static constexpr float kLieSeconds = 12.f;
-static constexpr float kHitRadius = 70.f;
-static constexpr float kGravity = 900.f;
-static constexpr float kLaunchVy = 420.f;
-static constexpr float kGhostScale = 0.45f;
+#include <string>
+#include <vector>
+#include <functional>
+#include <algorithm>
+#include <cmath>
 
-static bool isPaused() {
-    auto sc = CCDirector::get()->getRunningScene();
-    if (!sc || !sc->getChildren()) return false;
+static bool g_noclip = false;
+static bool g_flight = false;
+static bool g_verify = false;
+static bool g_noCopy = false;
+static bool g_gun = false;
+static bool g_pearl = false;
+static bool g_rocket = false;
+static bool g_penis = false;
 
-    for (auto c : CCArrayExt<CCNode*>(sc->getChildren())) {
-        if (c && typeinfo_cast<PauseLayer*>(c)) return true;
-    }
+static bool g_panelOpen = false;
 
-    return false;
-}
+class AdminPanel;
 
-static void collectRemote(CCNode* node, std::vector<CCNode*>& out, int depth) {
-    if (!node || depth > 4) return;
-
-    auto kids = node->getChildren();
-    if (!kids) return;
-
-    for (auto c : CCArrayExt<CCNode*>(kids)) {
-        if (!c) continue;
-
-        if (typeinfo_cast<CCSpriteBatchNode*>(c) || typeinfo_cast<GameObject*>(c))
-            continue;
-
-        auto name = geode::cocos::getObjectName(c);
-
-        if (name.find("RemotePlayer") != std::string_view::npos
-            || name.find("ComplexVisualPlayer") != std::string_view::npos) {
-            if (c->isVisible()) out.push_back(c);
-            continue;
-        }
-
-        collectRemote(c, out, depth + 1);
-    }
-}
-
-static CCNode* makeHand() {
-    auto root = CCNode::create();
-    auto d = CCDrawNode::create();
-
-    ccColor4F skin = {1.f, 0.80f, 0.35f, 1.f};
-    ccColor4F edge = {0.35f, 0.2f, 0.05f, 1.f};
-
-    CCPoint palm[4] = {
-        ccp(-10.f, 0.f),
-        ccp(10.f, 0.f),
-        ccp(10.f, 16.f),
-        ccp(-10.f, 16.f)
-    };
-
-    d->drawPolygon(palm, 4, skin, 1.f, edge);
-
-    float h[4] = {10.f, 12.f, 11.f, 8.f};
-
-    for (int i = 0; i < 4; i++) {
-        float x = -10.f + i * 5.f;
-
-        CCPoint f[4] = {
-            ccp(x, 16.f),
-            ccp(x + 4.2f, 16.f),
-            ccp(x + 4.2f, 16.f + h[i]),
-            ccp(x, 16.f + h[i])
-        };
-
-        d->drawPolygon(f, 4, skin, 1.f, edge);
-    }
-
-    CCPoint th[4] = {
-        ccp(-10.f, 3.f),
-        ccp(-18.f, 10.f),
-        ccp(-15.f, 14.f),
-        ccp(-10.f, 10.f)
-    };
-
-    d->drawPolygon(th, 4, skin, 1.f, edge);
-
-    root->addChild(d);
-    return root;
-}
-
-static void playSlapSound() {
-    auto fmod = FMODAudioEngine::sharedEngine();
-    if (fmod) fmod->playEffect("explode_11.ogg", 2.2f, 1.f, 0.8f);
-}
-
-class SlapButton : public CCLayer {
+class FloatingButton : public CCNode {
 protected:
-    CCNode* m_spr = nullptr;
-    CCPoint m_grab = ccp(0.f, 0.f);
-    CCPoint m_last = ccp(0.f, 0.f);
-    float m_total = 0.f;
-    bool m_drag = false;
-    std::function<void()> m_cb;
+    CCMenuItemSpriteExtra* m_button = nullptr;
 
-    bool init(std::function<void()> cb) {
-        if (!CCLayer::init()) return false;
-
-        m_cb = std::move(cb);
-
-        auto win = CCDirector::get()->getWinSize();
-
-        auto spr = ButtonSprite::create("SLAP");
-
-        float x = Mod::get()->getSavedValue<float>("btn-x", win.width / 2);
-        float y = Mod::get()->getSavedValue<float>("btn-y", win.height / 2);
-
-        spr->setPosition({x, y});
-        this->addChild(spr);
-        m_spr = spr;
-
-        this->setTouchEnabled(true);
-        return true;
-    }
-
-    void registerWithTouchDispatcher() override {
-        CCDirector::get()->getTouchDispatcher()->addTargetedDelegate(this, -510, true);
-    }
-
-    bool ccTouchBegan(CCTouch* t, CCEvent*) override {
-        if (!this->isVisible() || isPaused()) return false;
-
-        auto p = this->convertToNodeSpace(t->getLocation());
-
-        if (!m_spr->boundingBox().containsPoint(p)) return false;
-
-        m_drag = true;
-        m_total = 0.f;
-        m_last = p;
-        m_grab = m_spr->getPosition() - p;
-
-        m_spr->setScale(0.9f);
-        return true;
-    }
-
-    void ccTouchMoved(CCTouch* t, CCEvent*) override {
-        if (!m_drag) return;
-
-        auto p = this->convertToNodeSpace(t->getLocation());
-
-        m_total += ccpDistance(p, m_last);
-        m_last = p;
-
-        if (m_total > 10.f) {
-            auto win = CCDirector::get()->getWinSize();
-            auto np = p + m_grab;
-
-            np.x = std::max(0.f, std::min(win.width, np.x));
-            np.y = std::max(0.f, std::min(win.height, np.y));
-
-            m_spr->setPosition(np);
-        }
-    }
-
-    void ccTouchEnded(CCTouch*, CCEvent*) override {
-        if (!m_drag) return;
-
-        m_drag = false;
-        m_spr->setScale(1.f);
-
-        if (m_total > 10.f) {
-            Mod::get()->setSavedValue<float>("btn-x", m_spr->getPositionX());
-            Mod::get()->setSavedValue<float>("btn-y", m_spr->getPositionY());
-        }
-        else if (m_cb) {
-            m_cb();
-        }
-    }
-
-    void ccTouchCancelled(CCTouch*, CCEvent*) override {
-        m_drag = false;
-        if (m_spr) m_spr->setScale(1.f);
-    }
-
-public:
-    static SlapButton* create(std::function<void()> cb) {
-        auto r = new SlapButton();
-
-        if (r && r->init(std::move(cb))) {
-            r->autorelease();
-            return r;
-        }
-
-        CC_SAFE_DELETE(r);
-        return nullptr;
-    }
-};
-
-struct Ghost {
-    Ref<CCNode> real;
-    Ref<SimplePlayer> sp;
-    CCPoint vel = ccp(0.f, 0.f);
-    float av = 0.f;
-    float dir = 1.f;
-    float groundY = 0.f;
-    bool landed = false;
-    float lie = 0.f;
-};
-
-class SlapController : public CCNode {
-protected:
-    PlayLayer* m_pl = nullptr;
-    CCNode* m_hand = nullptr;
-    SlapButton* m_btn = nullptr;
-    bool m_on = false;
-    bool m_swinging = false;
-    float m_facing = 1.f;
-    float m_lastX = 0.f;
-    std::vector<Ghost> m_ghosts;
-
-    bool init(PlayLayer* pl) {
+    bool init() {
         if (!CCNode::init()) return false;
 
-        m_pl = pl;
+        auto spr = CCSprite::create("GJ_plusBtn_001.png");
+        if (!spr) spr = CCSprite::create("GJ_infoIcon_001.png");
+        if (!spr) return false;
 
-        auto win = CCDirector::get()->getWinSize();
-        m_on = Mod::get()->getSavedValue<bool>("enabled", false);
+        spr->setScale(0.65f);
 
-        m_hand = makeHand();
-        m_hand->setScale(1.2f);
-        m_hand->setVisible(false);
-        pl->m_objectLayer->addChild(m_hand, 1999);
-
-        m_btn = SlapButton::create([this]() {
-            this->slap();
-        });
-
-        this->addChild(m_btn, 5);
-
-        auto menu = CCMenu::create();
-        menu->setPosition({0.f, 0.f});
-        menu->setTouchPriority(-505);
-        this->addChild(menu, 6);
-
-        auto tog = CCMenuItemToggler::createWithStandardSprites(
-            this,
-            menu_selector(SlapController::onToggle),
-            0.5f
+        auto item = CCMenuItemSpriteExtra::create(
+            spr, this, menu_selector(FloatingButton::onPress)
         );
 
-        tog->setPosition({win.width - 24.f, 24.f});
-        tog->toggle(m_on);
-        menu->addChild(tog);
+        auto menu = CCMenu::create();
+        menu->addChild(item);
+        menu->setPosition(CCPointZero);
+        this->addChild(menu);
 
-        auto lbl = CCLabelBMFont::create("SLAP", "bigFont.fnt");
-        lbl->setScale(0.3f);
-        lbl->setPosition({win.width - 54.f, 24.f});
-        this->addChild(lbl, 6);
+        m_button = item;
+        this->setContentSize({45.f, 45.f});
 
-        if (pl->m_player1)
-            m_lastX = pl->m_player1->getPositionX();
+        auto win = CCDirector::get()->getWinSize();
+        float x = Mod::get()->getSavedValue<float>("panel-x", 35.f);
+        float y = Mod::get()->getSavedValue<float>("panel-y", win.height / 2);
 
-        this->schedule(schedule_selector(SlapController::tick));
+        this->setPosition({x, y});
+        this->setTouchEnabled(true);
+
         return true;
     }
 
-    void onToggle(CCObject* s) {
-        m_on = !static_cast<CCMenuItemToggler*>(s)->isToggled();
-        Mod::get()->setSavedValue<bool>("enabled", m_on);
-    }
-
-    void tick(float dt) {
-        if (!m_pl || !m_pl->m_player1) return;
-
-        auto p1 = m_pl->m_player1;
-
-        float x = p1->getPositionX();
-
-        if (fabsf(x - m_lastX) > 0.05f)
-            m_facing = (x > m_lastX) ? 1.f : -1.f;
-
-        m_lastX = x;
-
-        bool show = m_on && !p1->m_isDead;
-
-        m_hand->setVisible(show);
-        m_btn->setVisible(m_on);
-
-        if (show && p1->getParent() && m_hand->getParent()) {
-            auto wp = p1->getParent()->convertToWorldSpace(p1->getPosition());
-            auto lp = m_hand->getParent()->convertToNodeSpace(wp);
-
-            m_hand->setPosition(lp + ccp(m_facing * 22.f, -6.f));
-            m_hand->setScaleX(m_facing * 1.2f);
-            m_hand->setScaleY(1.2f);
-
-            if (!m_swinging)
-                m_hand->setRotation(m_facing * -15.f);
+    void onPress(CCObject*) {
+        if (g_panelOpen) return;
+        g_panelOpen = true;
+        if (auto scene = CCDirector::get()->getRunningScene()) {
+            scene->addChild(AdminPanel::create(), 100000);
         }
-
-        updateGhosts(dt);
-    }
-
-    void updateGhosts(float dt) {
-        for (auto it = m_ghosts.begin(); it != m_ghosts.end();) {
-            auto& g = *it;
-
-            if (g.real)
-                g.real->setVisible(false);
-
-            if (!g.landed) {
-                g.vel.y -= kGravity * dt;
-
-                auto p = g.sp->getPosition();
-                p.x += g.vel.x * dt;
-                p.y += g.vel.y * dt;
-
-                if (p.y <= g.groundY && g.vel.y < 0.f) {
-                    p.y = g.groundY;
-                    g.landed = true;
-                    g.sp->setRotation(g.dir * 90.f);
-                }
-                else {
-                    g.sp->setRotation(g.sp->getRotation() + g.av * dt);
-                }
-
-                g.sp->setPosition(p);
-            }
-            else {
-                g.lie += dt;
-
-                if (g.lie >= kLieSeconds) {
-                    if (g.real)
-                        g.real->setVisible(true);
-
-                    g.sp->removeFromParentAndCleanup(true);
-                    it = m_ghosts.erase(it);
-                    continue;
-                }
-            }
-
-            ++it;
-        }
-    }
-
-    void slap() {
-        if (!m_on || m_swinging || !m_pl || !m_pl->m_player1)
-            return;
-
-        m_swinging = true;
-
-        float f = m_facing;
-
-        m_hand->stopAllActions();
-
-        m_hand->runAction(CCSequence::create(
-            CCRotateTo::create(0.07f, f * -45.f),
-            CCEaseIn::create(CCRotateTo::create(0.06f, f * 110.f), 2.f),
-            CCCallFunc::create(this, callfunc_selector(SlapController::doHit)),
-            CCDelayTime::create(0.06f),
-            CCEaseOut::create(CCRotateTo::create(0.18f, f * -15.f), 2.f),
-            CCCallFunc::create(this, callfunc_selector(SlapController::swingDone)),
-            nullptr
-        ));
-    }
-
-    void swingDone() {
-        m_swinging = false;
-    }
-
-    bool alreadyFlying(CCNode* n) {
-        for (auto& g : m_ghosts) {
-            if (g.real == n) return true;
-        }
-
-        return false;
-    }
-
-    void doHit() {
-        playSlapSound();
-
-        auto p1 = m_pl->m_player1;
-        if (!p1 || !p1->getParent()) return;
-
-        auto me = p1->getParent()->convertToWorldSpace(p1->getPosition());
-        auto tip = me + ccp(m_facing * 40.f, 0.f);
-
-        std::vector<CCNode*> found;
-        collectRemote(m_pl, found, 0);
-
-        for (auto c : found) {
-            if (!c->getParent() || alreadyFlying(c)) continue;
-
-            auto tw = c->getParent()->convertToWorldSpace(c->getPosition());
-
-            if (ccpDistance(tw, tip) > kHitRadius) continue;
-
-            float dir = (tw.x >= me.x) ? 1.f : -1.f;
-            launch(c, tw, dir);
-        }
-    }
-
-    void launch(CCNode* target, CCPoint world, float dir) {
-        auto layer = m_pl->m_objectLayer;
-        auto lp = layer->convertToNodeSpace(world);
-
-        auto gm = GameManager::get();
-
-        auto sp = SimplePlayer::create(gm->getPlayerFrame());
-        sp->setColor(gm->colorForIdx(gm->getPlayerColor()));
-        sp->setSecondColor(gm->colorForIdx(gm->getPlayerColor2()));
-        sp->setScale(kGhostScale);
-        sp->setPosition(lp);
-
-        layer->addChild(sp, 2000);
-
-        float flight = 2.f * kLaunchVy / kGravity;
-
-        Ghost g;
-        g.real = target;
-        g.sp = sp;
-        g.dir = dir;
-        g.vel = ccp(dir * (kFlyBlocks * kBlock) / flight, kLaunchVy);
-        g.av = dir * 720.f;
-        g.groundY = lp.y;
-
-        m_ghosts.push_back(std::move(g));
-
-        target->setVisible(false);
-
-        auto lbl = CCLabelBMFont::create("SLAP!", "bigFont.fnt");
-        lbl->setScale(0.45f);
-        lbl->setColor({255, 60, 60});
-        lbl->setPosition(lp + ccp(0.f, 30.f));
-
-        layer->addChild(lbl, 2001);
-
-        lbl->runAction(CCSequence::create(
-            CCSpawn::create(
-                CCMoveBy::create(0.6f, ccp(0.f, 30.f)),
-                CCFadeOut::create(0.6f),
-                nullptr
-            ),
-            CCRemoveSelf::create(),
-            nullptr
-        ));
     }
 
 public:
-    static SlapController* create(PlayLayer* pl) {
-        auto r = new SlapController();
-
-        if (r && r->init(pl)) {
-            r->autorelease();
-            return r;
+    static FloatingButton* create() {
+        auto ret = new FloatingButton();
+        if (ret && ret->init()) {
+            ret->autorelease();
+            return ret;
         }
-
-        CC_SAFE_DELETE(r);
+        CC_SAFE_DELETE(ret);
         return nullptr;
     }
 };
 
-class $modify(SlapPlayLayer, PlayLayer) {
-    void setupHasCompleted() {
-        PlayLayer::setupHasCompleted();
+class AdminPanel : public FLAlertLayer {
+protected:
+    CCMenu* m_menu = nullptr;
 
-        if (auto c = SlapController::create(this))
-            this->addChild(c, 9999);
+    bool init() {
+        if (!FLAlertLayer::init(120.f)) return false;
+
+        this->m_noElasticity = true;
+        this->setTouchEnabled(true);
+        this->setKeypadEnabled(true);
+
+        auto win = CCDirector::get()->getWinSize();
+
+        auto bg = cocos2d::extension::CCScale9Sprite::create(
+            "GJ_square01.png"
+        );
+        bg->setContentSize({300.f, 310.f});
+        bg->setPosition(win / 2);
+        this->addChild(bg);
+
+        auto title = CCLabelBMFont::create("ADMIN PANEL", "bigFont.fnt");
+        title->setScale(0.55f);
+        title->setPosition({win.width / 2, win.height / 2 + 135.f});
+        this->addChild(title);
+
+        m_menu = CCMenu::create();
+        m_menu->setPosition(win / 2);
+        this->addChild(m_menu);
+
+        addToggle("NoClip", g_noclip, 100.f, menu_selector(AdminPanel::onNoClip));
+        addToggle("Flight", g_flight, 72.f, menu_selector(AdminPanel::onFlight));
+        addToggle("No C Mark", g_noCopy, 44.f, menu_selector(AdminPanel::onNoCopy));
+        addToggle("Verify Hack", g_verify, 16.f, menu_selector(AdminPanel::onVerify));
+        addToggle("Gun", g_gun, -12.f, menu_selector(AdminPanel::onGun));
+        addToggle("Pearl", g_pearl, -40.f, menu_selector(AdminPanel::onPearl));
+        addToggle("Rocket", g_rocket, -68.f, menu_selector(AdminPanel::onRocket));
+        addToggle("Penis", g_penis, -96.f, menu_selector(AdminPanel::onPenis));
+
+        addButton("Open Dev", -124.f, menu_selector(AdminPanel::onDev));
+        addButton("Change Stats", -152.f, menu_selector(AdminPanel::onStats));
+
+        auto close = CCMenuItemSpriteExtra::create(
+            CCSprite::createWithSpriteFrameName("GJ_closeBtn_001.png"),
+            this,
+            menu_selector(AdminPanel::onClose)
+        );
+        close->setPosition({145.f, 145.f});
+        m_menu->addChild(close);
+
+        return true;
+    }
+
+    void addToggle(
+        const char* name,
+        bool value,
+        float y,
+        SEL_MenuHandler handler
+    ) {
+        auto label = CCLabelBMFont::create(name, "bigFont.fnt");
+        label->setScale(0.35f);
+
+        auto item = CCMenuItemToggler::createWithStandardSprites(
+            this, handler, 0.5f
+        );
+
+        item->toggle(value);
+
+        auto row = CCMenu::create();
+        row->addChild(item);
+        row->setPosition({-75.f, y});
+        m_menu->addChild(row);
+
+        label->setAnchorPoint({0.f, 0.5f});
+        label->setPosition({-55.f, y});
+        m_menu->addChild(label);
+    }
+
+    void addButton(
+        const char* name,
+        float y,
+        SEL_MenuHandler handler
+    ) {
+        auto label = CCLabelBMFont::create(name, "goldFont.fnt");
+        label->setScale(0.38f);
+
+        auto item = CCMenuItemSpriteExtra::create(
+            label, this, handler
+        );
+
+        item->setPosition({0.f, y});
+        m_menu->addChild(item);
+    }
+
+    void onNoClip(CCObject* s) {
+        g_noclip = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+    }
+
+    void onFlight(CCObject* s) {
+        g_flight = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+    }
+
+    void onNoCopy(CCObject* s) {
+        g_noCopy = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+    }
+
+    void onVerify(CCObject* s) {
+        g_verify = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+    }
+
+    void onGun(CCObject* s) {
+        g_gun = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+    }
+
+    void onPearl(CCObject* s) {
+        g_pearl = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+    }
+
+    void onRocket(CCObject* s) {
+        g_rocket = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+    }
+
+    void onPenis(CCObject* s) {
+        g_penis = !static_cast<CCMenuItemToggler*>(s)->isToggled();
+    }
+
+    void onDev(CCObject*) {
+        this->keyBackClicked();
+        geode::openSettingsPopup(Mod::get());
+    }
+
+    void onStats(CCObject*) {
+        FLAlertLayer::create(
+            "Change Stats",
+            "Use the game's account settings to manage your statistics.",
+            "OK"
+        )->show();
+    }
+
+    void onClose(CCObject*) {
+        this->keyBackClicked();
+    }
+
+    void keyBackClicked() override {
+        g_panelOpen = false;
+        this->removeFromParentAndCleanup(true);
+    }
+
+public:
+    static AdminPanel* create() {
+        auto ret = new AdminPanel();
+        if (ret && ret->init()) {
+            ret->autorelease();
+            return ret;
+        }
+        CC_SAFE_DELETE(ret);
+        return nullptr;
+    }
+};
+
+class AdminPanelManager : public CCNode {
+protected:
+    bool init() {
+        if (!CCNode::init()) return false;
+        if (auto btn = FloatingButton::create()) {
+            this->addChild(btn);
+        }
+        return true;
+    }
+
+public:
+    static AdminPanelManager* create() {
+        auto ret = new AdminPanelManager();
+        if (ret && ret->init()) {
+            ret->autorelease();
+            return ret;
+        }
+        CC_SAFE_DELETE(ret);
+        return nullptr;
+    }
+};
+
+class $modify(AdminMenuLayer, MenuLayer) {
+    bool init() {
+        if (!MenuLayer::init()) return false;
+        if (auto manager = AdminPanelManager::create()) {
+            this->addChild(manager, 99999);
+        }
+        return true;
+    }
+};
+
+class $modify(AdminPlayLayer, PlayLayer) {
+    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects))
+            return false;
+
+        if (auto manager = AdminPanelManager::create()) {
+            this->addChild(manager, 99999);
+        }
+
+        return true;
+    }
+};
+
+class $modify(AdminPlayerObject, PlayerObject) {
+    void update(float dt) {
+        PlayerObject::update(dt);
+
+        if (g_flight && !m_isDead) {
+            if (this->m_isPlatformer) {
+                this->m_yVelocity = 0.f;
+            } else {
+                this->m_yVelocity = 0.f;
+            }
+        }
+
+        if (g_noclip) {
+            this->m_isCollidingWithObject = false;
+        }
     }
 };
