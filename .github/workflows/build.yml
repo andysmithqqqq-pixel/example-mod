@@ -1,4 +1,4 @@
-name: Build Geode Mod
+name: Build Admin Panel
 
 on:
   workflow_dispatch:
@@ -8,29 +8,23 @@ on:
 
 jobs:
   build:
-    name: Android64
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build the mod
-        uses: geode-sdk/build-geode-mod@main
+      - uses: geode-sdk/build-geode-mod@main
         with:
           bindings: geode-sdk/bindings
+          bindings-ref: main
           combine: true
           target: Android64
 
   package:
-    name: Package builds
     runs-on: ubuntu-latest
-    needs: [build]
-
+    needs: build
     steps:
       - uses: geode-sdk/build-geode-mod/combine@main
         id: build
-
       - uses: actions/upload-artifact@v4
         with:
-          name: Slap-Android64
+          name: AdminPanel-Android64
           path: ${{ steps.build.outputs.build-output }}
